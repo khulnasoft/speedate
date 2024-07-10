@@ -230,12 +230,22 @@ fn date_comparison() {
 }
 
 #[test]
-fn date_timestamp() {
+fn date_timestamp_exact() {
     let d = Date::from_timestamp(1_654_560_000, true).unwrap();
     assert_eq!(d.to_string(), "2022-06-07");
     assert_eq!(d.timestamp(), 1_654_560_000);
 
     match Date::from_timestamp(1_654_560_001, true) {
+        Ok(d) => panic!("unexpectedly valid, {d}"),
+        Err(e) => assert_eq!(e, ParseError::DateNotExact),
+    }
+
+    // milliseconds
+    let d = Date::from_timestamp(1_654_560_000_000, true).unwrap();
+    assert_eq!(d.to_string(), "2022-06-07");
+    assert_eq!(d.timestamp(), 1_654_560_000);
+
+    match Date::from_timestamp(1_654_560_000_001, true) {
         Ok(d) => panic!("unexpectedly valid, {d}"),
         Err(e) => assert_eq!(e, ParseError::DateNotExact),
     }
@@ -853,7 +863,18 @@ param_tests! {
     dt_underscore: ok => "2020-01-01_12:13:14,123z", "2020-01-01T12:13:14.123000Z";
     dt_unix1: ok => "1654646400", "2022-06-08T00:00:00";
     dt_unix2: ok => "1654646404", "2022-06-08T00:00:04";
+    dt_unix_1_neg: ok => "-1654646400", "1917-07-27T00:00:00";
+    dt_unix_2_neg: ok => "-1654646404", "1917-07-26T23:59:56";
     dt_unix_float: ok => "1654646404.5", "2022-06-08T00:00:04.500000";
+    dt_unix_float_limit: ok => "1654646404.123456", "2022-06-08T00:00:04.123456";
+    dt_unix_float_ms: ok => "1654646404000.5", "2022-06-08T00:00:04.000500";
+    dt_unix_float_ms_limit: ok => "1654646404123.456", "2022-06-08T00:00:04.123456";
+    dt_unix_float_ms_neg: ok => "-1654646404.123456", "1917-07-26T23:59:55.876544";
+    dt_unix_float_ms_neg_limit: ok => "-1654646404000.123", "1917-07-26T23:59:55.999877";
+    dt_unix_float_empty: ok => "1654646404.", "2022-06-08T00:00:04";
+    dt_unix_float_ms_empty: ok => "1654646404000.", "2022-06-08T00:00:04";
+    dt_unix_float_too_long: err => "1654646404.1234567", SecondFractionTooLong;
+    dt_unix_float_ms_too_long: err => "1654646404123.4567", MillisecondFractionTooLong;
     dt_short_date: err => "xxx", TooShort;
     dt_short_time: err => "2020-01-01T12:0", TooShort;
     dt: err => "202x-01-01", InvalidCharYear;
@@ -1153,7 +1174,13 @@ param_tests! {
     duration_time_fraction: ok => "00:01:03.123", "PT1M3.123S";
     duration_time_extra: err => "00:01:03.123x", ExtraCharacters;
     duration_time_timezone: err => "00:01:03x", ExtraCharacters;
-    duration_time_invalid_hour: err => "24:01:03", OutOfRangeHour;
+    duration_time_more_than_24_hour: ok => "24:01:03", "P1DT1M3S";
+    duration_time_way_more_than_24_hour: ok => "2400000000:01:03", "P273972Y220DT1M3S";
+    duration_time_way_more_than_24_hour_long_fraction: ok => "2400000000:01:03.654321", "P273972Y220DT1M3.654321S";
+    duration_time_invalid_over_limit_hour: err => "100000000000:01:03", DurationHourValueTooLarge;
+    duration_time_overflow_hour: err => "100000000000000000000000:01:03", DurationHourValueTooLarge;
+    duration_time_invalid_format_hour: err => "1000xxx000:01:03", InvalidCharHour;
+    duration_time_invalid_format_hour2: err => "1 10:10", InvalidCharHour;
     duration_time_invalid_minute: err => "00:60:03", OutOfRangeMinute;
     duration_time_invalid_second: err => "00:00:60", OutOfRangeSecond;
     duration_time_fraction_too_long: err => "00:00:00.1234567", SecondFractionTooLong;
@@ -1375,7 +1402,10 @@ fn test_datetime_parse_bytes_does_not_add_offset_for_rfc3339() {
 fn test_datetime_parse_unix_timestamp_from_bytes_with_utc_offset() {
     let time = DateTime::parse_bytes_with_config(
         "1689102037.5586429".as_bytes(),
-        &(TimeConfigBuilder::new().unix_timestamp_offset(Some(0)).build()),
+        &(TimeConfigBuilder::new()
+            .unix_timestamp_offset(Some(0))
+            .microseconds_precision_overflow_behavior(MicrosecondsPrecisionOverflowBehavior::Truncate)
+            .build()),
     )
     .unwrap();
     assert_eq!(time.to_string(), "2023-07-11T19:00:37.558643Z");
@@ -1385,7 +1415,10 @@ fn test_datetime_parse_unix_timestamp_from_bytes_with_utc_offset() {
 fn test_datetime_parse_unix_timestamp_from_bytes_as_naive() {
     let time = DateTime::parse_bytes_with_config(
         "1689102037.5586429".as_bytes(),
-        &(TimeConfigBuilder::new().unix_timestamp_offset(None).build()),
+        &(TimeConfigBuilder::new()
+            .unix_timestamp_offset(None)
+            .microseconds_precision_overflow_behavior(MicrosecondsPrecisionOverflowBehavior::Truncate)
+            .build()),
     )
     .unwrap();
     assert_eq!(time.to_string(), "2023-07-11T19:00:37.558643");

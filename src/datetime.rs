@@ -1,5 +1,7 @@
-use crate::numbers::{float_parse_bytes, IntFloat};
-use crate::TimeConfigBuilder;
+use crate::date::MS_WATERSHED;
+use crate::{
+    float_parse_bytes, numbers::decimal_digits, IntFloat, MicrosecondsPrecisionOverflowBehavior, TimeConfigBuilder,
+};
 use crate::{time::TimeConfig, Date, ParseError, Time};
 use std::cmp::Ordering;
 use std::fmt;
@@ -342,8 +344,35 @@ impl DateTime {
             Err(e) => match float_parse_bytes(bytes) {
                 IntFloat::Int(int) => Self::from_timestamp_with_config(int, 0, config),
                 IntFloat::Float(float) => {
-                    let micro = (float.fract() * 1_000_000_f64).round() as u32;
-                    Self::from_timestamp_with_config(float.floor() as i64, micro, config)
+                    let timestamp_in_milliseconds = float.abs() > MS_WATERSHED as f64;
+
+                    if config.microseconds_precision_overflow_behavior == MicrosecondsPrecisionOverflowBehavior::Error {
+                        let decimal_digits_count = decimal_digits(bytes);
+
+                        // If the number of decimal digits exceeds the maximum allowed for the timestamp precision,
+                        // return an error. For timestamps in milliseconds, the maximum is 3, for timestamps in seconds,
+                        // the maximum is 6. These end up being the same in terms of allowing microsecond precision.
+                        if timestamp_in_milliseconds && decimal_digits_count > 3 {
+                            return Err(ParseError::MillisecondFractionTooLong);
+                        } else if !timestamp_in_milliseconds && decimal_digits_count > 6 {
+                            return Err(ParseError::SecondFractionTooLong);
+                        }
+                    }
+
+                    let timestamp_normalized: f64 = if timestamp_in_milliseconds {
+                        float / 1_000f64
+                    } else {
+                        float
+                    };
+
+                    // if seconds is negative, we round down (left on the number line), so -6.25 -> -7
+                    // which allows for a positive number of microseconds to compensate back up to -6.25
+                    // which is the equivalent of doing (seconds - 1) and (microseconds + 1_000_000)
+                    // like we do in Date::timestamp_watershed
+                    let seconds = timestamp_normalized.floor() as i64;
+                    let microseconds = ((timestamp_normalized - seconds as f64) * 1_000_000f64).round() as u32;
+
+                    Self::from_timestamp_with_config(seconds, microseconds, config)
                 }
                 IntFloat::Err => Err(e),
             },
@@ -400,9 +429,7 @@ impl DateTime {
                 .ok_or(ParseError::TimeTooLarge)?;
             total_microsecond %= 1_000_000;
         }
-        let date = Date::from_timestamp_calc(second)?;
-        // rem_euclid since if `timestamp_second = -100`, we want `time_second = 86300` (e.g. `86400 - 100`)
-        let time_second = second.rem_euclid(86_400) as u32;
+        let (date, time_second) = Date::from_timestamp_calc(second)?;
         Ok(Self {
             date,
             time: Time::from_timestamp_with_config(time_second, total_microsecond, config)?,
