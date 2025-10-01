@@ -1,13 +1,15 @@
+use crate::config::DateTimeConfig;
 use crate::date::MS_WATERSHED;
+use crate::util::timestamp_to_seconds_micros;
 use crate::{
     float_parse_bytes, numbers::decimal_digits, IntFloat, MicrosecondsPrecisionOverflowBehavior, TimeConfigBuilder,
+    TimestampUnit,
 };
-use crate::{time::TimeConfig, Date, ParseError, Time};
+use crate::{Date, ParseError, Time, TimeConfig};
 use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
 use std::time::SystemTime;
-
 /// A DateTime
 ///
 /// Combines a [Date], [Time].
@@ -24,7 +26,7 @@ use std::time::SystemTime;
 /// `DateTime` supports equality (`==`) and inequality (`>`, `<`, `>=`, `<=`) comparisons.
 ///
 /// See [DateTime::partial_cmp] for how this works.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct DateTime {
     /// date part of the datetime
     pub date: Date,
@@ -219,6 +221,11 @@ impl DateTime {
     pub fn parse_str(str: &str) -> Result<Self, ParseError> {
         Self::parse_bytes(str.as_bytes())
     }
+
+    /// As with [`DateTime::parse_str`] but with a [`DateTimeConfig`].
+    pub fn parse_str_with_config(str: &str, config: &DateTimeConfig) -> Result<Self, ParseError> {
+        Self::parse_bytes_with_config(str.as_bytes(), config)
+    }
     /// Parse a datetime from bytes using RFC 3339 format
     ///
     /// # Arguments
@@ -320,33 +327,38 @@ impl DateTime {
     /// assert_eq!(dt.to_string(), "2022-01-01T12:13:14");
     /// ```
     pub fn parse_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
-        DateTime::parse_bytes_with_config(bytes, &TimeConfigBuilder::new().build())
+        DateTime::parse_bytes_with_config(bytes, &DateTimeConfig::default())
     }
 
-    /// Same as `DateTime::parse_bytes` but supporting TimeConfig
+    /// Same as `DateTime::parse_bytes` but supporting `DateTimeConfig`
     ///
     /// # Arguments
     ///
     /// * `bytes` - The bytes to parse
-    /// * `config` - The TimeConfig to use when parsing the time portion
+    /// * `config` - The `DateTimeConfig` to use when parsing the time portion
     ///
     /// # Examples
     ///
     /// ```
-    /// use speedate::{DateTime, Date, Time, TimeConfigBuilder};
+    /// use speedate::{DateTime, Date, Time, DateTimeConfig};
     ///
-    /// let dt = DateTime::parse_bytes_with_config(b"2022-01-01T12:13:14Z", &TimeConfigBuilder::new().build()).unwrap();
+    /// let dt = DateTime::parse_bytes_with_config(
+    ///     b"2022-01-01T12:13:14Z",
+    ///     &DateTimeConfig::default(),
+    /// ).unwrap();
     /// assert_eq!(dt.to_string(), "2022-01-01T12:13:14Z");
     /// ```
-    pub fn parse_bytes_with_config(bytes: &[u8], config: &TimeConfig) -> Result<Self, ParseError> {
-        match Self::parse_bytes_rfc3339_with_config(bytes, config) {
+    pub fn parse_bytes_with_config(bytes: &[u8], config: &DateTimeConfig) -> Result<Self, ParseError> {
+        match Self::parse_bytes_rfc3339_with_config(bytes, &config.time_config) {
             Ok(d) => Ok(d),
             Err(e) => match float_parse_bytes(bytes) {
                 IntFloat::Int(int) => Self::from_timestamp_with_config(int, 0, config),
                 IntFloat::Float(float) => {
                     let timestamp_in_milliseconds = float.abs() > MS_WATERSHED as f64;
 
-                    if config.microseconds_precision_overflow_behavior == MicrosecondsPrecisionOverflowBehavior::Error {
+                    if config.time_config.microseconds_precision_overflow_behavior
+                        == MicrosecondsPrecisionOverflowBehavior::Error
+                    {
                         let decimal_digits_count = decimal_digits(bytes);
 
                         // If the number of decimal digits exceeds the maximum allowed for the timestamp precision,
@@ -368,7 +380,7 @@ impl DateTime {
                     // if seconds is negative, we round down (left on the number line), so -6.25 -> -7
                     // which allows for a positive number of microseconds to compensate back up to -6.25
                     // which is the equivalent of doing (seconds - 1) and (microseconds + 1_000_000)
-                    // like we do in Date::timestamp_watershed
+                    // like we do in timestamp_watershed
                     let seconds = timestamp_normalized.floor() as i64;
                     let microseconds = ((timestamp_normalized - seconds as f64) * 1_000_000f64).round() as u32;
 
@@ -406,20 +418,28 @@ impl DateTime {
     /// # Examples
     ///
     /// ```
-    /// use speedate::{DateTime, TimeConfigBuilder};
+    /// use speedate::{DateTime, DateTimeConfig};
     ///
-    /// let d = DateTime::from_timestamp_with_config(1_654_619_320, 123, &TimeConfigBuilder::new().build()).unwrap();
+    /// let d = DateTime::from_timestamp_with_config(
+    ///     1_654_619_320,
+    ///     123,
+    ///     &DateTimeConfig::default(),
+    /// ).unwrap();
     /// assert_eq!(d.to_string(), "2022-06-07T16:28:40.000123");
     ///
-    /// let d = DateTime::from_timestamp_with_config(1_654_619_320_123, 123_000, &TimeConfigBuilder::new().build()).unwrap();
+    /// let d = DateTime::from_timestamp_with_config(
+    ///     1_654_619_320_123,
+    ///     123_000,
+    ///     &DateTimeConfig::default(),
+    /// ).unwrap();
     /// assert_eq!(d.to_string(), "2022-06-07T16:28:40.246000");
     /// ```
     pub fn from_timestamp_with_config(
         timestamp: i64,
         timestamp_microsecond: u32,
-        config: &TimeConfig,
+        config: &DateTimeConfig,
     ) -> Result<Self, ParseError> {
-        let (mut second, extra_microsecond) = Date::timestamp_watershed(timestamp)?;
+        let (mut second, extra_microsecond) = timestamp_to_seconds_micros(timestamp, config.timestamp_unit)?;
         let mut total_microsecond = timestamp_microsecond
             .checked_add(extra_microsecond)
             .ok_or(ParseError::TimeTooLarge)?;
@@ -432,24 +452,68 @@ impl DateTime {
         let (date, time_second) = Date::from_timestamp_calc(second)?;
         Ok(Self {
             date,
-            time: Time::from_timestamp_with_config(time_second, total_microsecond, config)?,
+            time: Time::from_timestamp_with_config(time_second, total_microsecond, &config.time_config)?,
         })
+    }
+
+    /// Same as `from_timestamp_with_config` where the timestamp and milliseconds
+    /// are encoded as a single float.
+    ///
+    /// # Arguments
+    ///
+    /// * `timestamp` - timestamp in either seconds or milliseconds
+    /// * `config` - the `DateTimeConfig` to use
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use speedate::{DateTime, DateTimeConfig};
+    ///
+    /// let d = DateTime::from_float_with_config(
+    ///     1_654_619_320.000123,
+    ///     &DateTimeConfig::default(),
+    /// ).unwrap();
+    /// assert_eq!(d.to_string(), "2022-06-07T16:28:40.000123");
+    ///
+    /// let d = DateTime::from_float_with_config(
+    ///     1_654_619_320_123.123,
+    ///     &DateTimeConfig::default(),
+    /// ).unwrap();
+    /// assert_eq!(d.to_string(), "2022-06-07T16:28:40.123123");
+    /// ```
+    pub fn from_float_with_config(timestamp: f64, mode: &DateTimeConfig) -> Result<Self, ParseError> {
+        let microseconds = match mode.timestamp_unit {
+            TimestampUnit::Second => timestamp.fract().abs() * 1_000_000.0,
+            TimestampUnit::Millisecond => timestamp.fract().abs() * 1_000.0,
+            TimestampUnit::Infer => {
+                if timestamp.abs() <= MS_WATERSHED as f64 {
+                    // treat as seconds
+                    timestamp.fract().abs() * 1_000_000.0
+                } else {
+                    // treat as milliseconds
+                    timestamp.fract().abs() * 1_000.0
+                }
+            }
+        };
+        // checking for extra digits in microseconds is unreliable with large floats,
+        // so we just round to the nearest microsecond
+        Self::from_timestamp_with_config(timestamp.floor() as i64, microseconds.round() as u32, mode)
     }
 
     /// Create a datetime from a Unix Timestamp in seconds or milliseconds
     ///
     /// ("Unix Timestamp" means number of seconds or milliseconds since 1970-01-01)
     ///
-    /// Input must be between `-11_676_096_000` (`1600-01-01T00:00:00`) and
-    /// `253_402_300_799_000` (`9999-12-31T23:59:59.999999`) inclusive.
+    /// Input must be between `-62,167,219,200,000` (`0000-01-01`) and `253,402,300,799,000` (`9999-12-31`) inclusive.
     ///
-    /// If the absolute value is > 2e10 (`20_000_000_000`) it is interpreted as being in milliseconds.
+    /// If the absolute value is > 2e10 (`20,000,000,000`) it is interpreted as being in milliseconds.
     ///
     /// That means:
-    /// * `20_000_000_000` is `2603-10-11T11:33:20`
-    /// * `20_000_000_001` is `1970-08-20T11:33:20.001`
-    /// * `-20_000_000_000` gives an error - `DateTooSmall` as it would be before 1600
-    /// * `-20_000_000_001` is `1969-05-14T12:26:39.999`
+    /// * `20,000,000,000` is `2603-10-11`
+    /// * `20,000,000,001` is `1970-08-20`
+    /// * `-62,167,219,200,001` gives an error - `DateTooSmall` as it would be before 0000-01-01
+    /// * `-20,000,000,001` is `1969-05-14`
+    /// * `-20,000,000,000` is `1336-03-23`
     ///
     /// # Arguments
     ///
@@ -471,7 +535,7 @@ impl DateTime {
     /// assert_eq!(d.to_string(), "2022-06-07T16:28:40.246000");
     /// ```
     pub fn from_timestamp(timestamp: i64, timestamp_microsecond: u32) -> Result<Self, ParseError> {
-        Self::from_timestamp_with_config(timestamp, timestamp_microsecond, &TimeConfigBuilder::new().build())
+        Self::from_timestamp_with_config(timestamp, timestamp_microsecond, &DateTimeConfig::default())
     }
 
     /// Create a datetime from the system time. This method uses [std::time::SystemTime] to get
@@ -525,7 +589,7 @@ impl DateTime {
     /// ```
     pub fn with_timezone_offset(&self, tz_offset: Option<i32>) -> Result<Self, ParseError> {
         Ok(Self {
-            date: self.date.clone(),
+            date: self.date,
             time: self.time.with_timezone_offset(tz_offset)?,
         })
     }
@@ -581,6 +645,20 @@ impl DateTime {
         self.date.timestamp() + self.time.total_seconds() as i64
     }
 
+    /// Unix timestamp in milliseconds, ignoring timezone offset.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use speedate::DateTime;
+    ///
+    /// let dt = DateTime::parse_str("1970-01-02T00:00:00.123").unwrap();
+    /// assert_eq!(dt.timestamp_ms(), 86_400_123);
+    /// ```
+    pub fn timestamp_ms(&self) -> i64 {
+        self.timestamp() * 1000 + (self.time.microsecond / 1000) as i64
+    }
+
     /// Unix timestamp assuming epoch is in zulu timezone (1970-01-01T00:00:00Z) and accounting for
     /// timezone offset.
     ///
@@ -606,5 +684,10 @@ impl DateTime {
             Some(tz_offset) => self.timestamp() - (tz_offset as i64),
             None => self.timestamp(),
         }
+    }
+
+    /// Unix timestamp in milliseconds accounting for timezone offset.
+    pub fn timestamp_tz_ms(&self) -> i64 {
+        self.timestamp_tz() * 1000 + (self.time.microsecond / 1000) as i64
     }
 }

@@ -4,20 +4,25 @@ extern crate strum;
 
 use strum::{Display, EnumMessage};
 
+mod config;
 mod date;
 mod datetime;
 mod duration;
 mod numbers;
 mod time;
+mod util;
 
+pub use config::{
+    DateConfig, DateConfigBuilder, DateTimeConfig, DateTimeConfigBuilder, TimeConfig, TimeConfigBuilder, TimestampUnit,
+};
 pub use date::Date;
 pub use datetime::DateTime;
 pub use duration::Duration;
-pub use time::{MicrosecondsPrecisionOverflowBehavior, Time, TimeConfig, TimeConfigBuilder};
+pub use time::{MicrosecondsPrecisionOverflowBehavior, Time};
 
 pub use numbers::{float_parse_bytes, float_parse_str, int_parse_bytes, int_parse_str, IntFloat};
 
-/// Parsing datetime, date, time & duration values
+// Parsing datetime, date, time & duration values
 
 // get a character from the bytes as as a decimal
 macro_rules! get_digit {
@@ -138,7 +143,7 @@ pub enum ParseError {
     DurationHourValueTooLarge,
     /// durations may not exceed 999,999,999 days
     DurationDaysTooLarge,
-    /// dates before 1600 are not supported as unix timestamps
+    /// dates before 0000 are not supported as unix timestamps
     DateTooSmall,
     /// dates after 9999 are not supported as unix timestamps
     DateTooLarge,
@@ -151,6 +156,8 @@ pub enum ParseError {
 pub enum ConfigError {
     // SecondsPrecisionOverflowBehavior string representation, must be one of "error" or "truncate"
     UnknownMicrosecondsPrecisionOverflowBehaviorString,
+    // TimestampUnit string representation, must be one of "s", "ms" or "infer"
+    UnknownTimestampUnitString,
 }
 
 /// Used internally to write numbers to a buffer for `Display` of speedate types
